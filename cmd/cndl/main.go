@@ -1,20 +1,20 @@
 package main
 
 import (
-	"fmt"
-	"os"
-	"hash/crc32"
 	"encoding/binary"
+	"fmt"
+	"hash/crc32"
+	"os"
 
-	"cndl/internal/utils"
 	"cndl/internal/store"
-	"github.com/spf13/cobra"
+	"cndl/internal/utils"
+
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
+	"github.com/spf13/cobra"
 )
 
 func WrapChunk(c chunkenc.Chunk) []byte {
 	raw := c.Bytes()
-
 	res := make([]byte, 1+len(raw)+4)
 
 	res[0] = byte(c.Encoding())
@@ -24,58 +24,121 @@ func WrapChunk(c chunkenc.Chunk) []byte {
 	checksum := crc32.Checksum(res[:1+len(raw)], table)
 
 	binary.BigEndian.PutUint32(res[1+len(raw):], checksum)
-
 	return res
 }
 
 func main() {
-	var root = &cobra.Command{Use: "cndl"}
+	cwd, _ := os.Getwd()
+	s := store.New(cwd)
+
+	var rootCmd = &cobra.Command{
+		Use:   "cndl",
+		Short: "TBA",
+	}
 
 	var initCmd = &cobra.Command{
 		Use:   "init",
 		Short: "Initialize the data store",
 		Run: func(cmd *cobra.Command, args []string) {
-			err := store.InitRepository()
-			if err != nil {
+			if err := s.Init(); err != nil {
 				fmt.Printf("Failed to init: %v\n", err)
 				os.Exit(1)
 			}
-			path, _ := store.GetRepoPath()
-			fmt.Printf("Initialized Cndl repo at: %s\n", path)
+			fmt.Printf("Initialized Cndl repo at: %s\n", s.Root)
 		},
 	}
 
 	var addCmd = &cobra.Command{
 		Use:   "add [ticker]",
 		Short: "Generate and add a data chunk for a ticker",
-		Args:  cobra.ExactArgs(1), // Requires exactly 1 argument (the ticker)
+		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
-			ticker := args[0]
-
-			if !store.IsInitialized() {
+			// 1. Check if store is initialized
+			if !s.Exists() {
 				fmt.Println("Error: Not a cndl repository. Run 'cndl init' first.")
 				os.Exit(1)
 			}
 
 			c := chunkenc.NewXORChunk()
 			appender, _ := c.Appender()
-			for i, v := range utils.GenerateGBM(100, 7200, 0, 0.001) {
+
+			prices := utils.GenerateGBM(100, 7200, 0, 0.001)
+			for i, v := range prices {
 				appender.Append(int64(i), v)
 			}
 
 			data := WrapChunk(c)
 
-			hash, err := store.WriteObject(data)
+			hash, err := s.Put(data)
 			if err != nil {
 				fmt.Printf("Failed to store: %v\n", err)
 				os.Exit(1)
 			}
 
-			fmt.Printf("Ticker: %s\n", ticker)
-			fmt.Printf("Stored as Object: %s\n", hash)
+			fmt.Printf("Object Hash: %s\n", hash)
 		},
 	}
 
-	root.AddCommand(initCmd, addCmd)
-	root.Execute()
+	var showCmd = &cobra.Command{
+		Use:   "show [hash]",
+		Short: "Examine the contents of a data chunk",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			if !s.Exists() {
+				fmt.Println("Error: Not a cndl repository.")
+				os.Exit(1)
+			}
+
+			path, err := s.ResolvePath(args[0])
+			if err != nil {
+				fmt.Printf("%v\n", err)
+				os.Exit(1)
+			}
+
+			data, _ := os.ReadFile(path)
+
+			payloadLen := len(data) - 4
+			want := binary.BigEndian.Uint32(data[payloadLen:])
+			got := crc32.Checksum(data[:payloadLen], crc32.MakeTable(crc32.Castagnoli))
+
+			if want != got {
+				fmt.Println("Error: Checksum mismatch! Data is corrupted.")
+				os.Exit(1)
+			}
+
+			chunk, err := chunkenc.FromData(chunkenc.Encoding(data[0]), data[1:payloadLen])
+			if err != nil {
+				fmt.Printf("Failed to parse chunk: %v\n", err)
+				os.Exit(1)
+			}
+
+			it := chunk.Iterator(nil)
+			var firstT, lastT int64
+			var firstV, lastV float64
+			count := 0
+
+			for it.Next() != chunkenc.ValNone {
+				t, v := it.At()
+				if count == 0 {
+					firstT, firstV = t, v
+				}
+				lastT, lastV = t, v
+				count++
+			}
+
+			fmt.Printf("Object: %s\n", args[0])
+			fmt.Printf("Samples: %d\n", count)
+			fmt.Printf("Start:  T=%d | Price: %.2f\n", firstT, firstV)
+			fmt.Printf("End:    T=%d | Price: %.2f\n", lastT, lastV)
+			fmt.Printf("Change: %.2f%%\n", ((lastV-firstV)/firstV)*100)
+			fmt.Printf("Checksum: 0x%X\n", (got))
+		},
+	}
+
+	rootCmd.AddCommand(initCmd, addCmd, showCmd)
+
+	if err := rootCmd.Execute(); err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
 }
