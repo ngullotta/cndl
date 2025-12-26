@@ -31,31 +31,42 @@ func IsInitialized() bool {
 }
 
 func WriteObject(data []byte) (string, error) {
-	hasher := sha256.New()
-	hasher.Write(data)
-	hash := hex.EncodeToString(hasher.Sum(nil))
+    hasher := sha256.New()
+    hasher.Write(data)
+    hash := hex.EncodeToString(hasher.Sum(nil))
 
-	base, err := GetRepoPath()
-	if err != nil {
-		return "", err
-	}
+    base, err := GetRepoPath()
+    if err != nil {
+        return "", err
+    }
 
-	dir := filepath.Join(base, ObjectsDir, hash[:2])
-	if err := os.MkdirAll(dir, 0o0755); err != nil {
-		return "", fmt.Errorf("failed to create object directory: %w", err)
-	}
+    shardDir := filepath.Join(base, ObjectsDir, hash[:2])
+    
+    if err := os.MkdirAll(shardDir, 0o0755); err != nil {
+        return "", fmt.Errorf("failed to create shard dir: %w", err)
+    }
 
-	path := filepath.Join(dir, hash[2:])
+    path := filepath.Join(shardDir, hash[2:])
 
-	if _, err := os.Stat(path); err == nil {
-		return hash, nil
-	}
+    if _, err := os.Stat(path); err == nil {
+        return hash, nil
+    }
 
-	if err := os.WriteFile(path, data, 0o0644); err != nil {
-		return "", fmt.Errorf("failed to write object: %w", err)
-	}
+    fp, err := os.Create(path)
+    if err != nil {
+        return "", fmt.Errorf("failed to create object file: %w", err)
+    }
+    defer fp.Close()
 
-	return hash, nil
+    if _, err := fp.Write(data); err != nil {
+        return "", fmt.Errorf("failed to write object: %w", err)
+    }
+
+    if err := fp.Sync(); err != nil {
+        return "", err
+    }
+
+    return hash, nil
 }
 
 func ReadObject(hash string) ([]byte, error) {
@@ -103,4 +114,18 @@ func ListObjects() ([]string, error) {
 	})
 
 	return hashes, err
+}
+
+func InitRepository() error {
+	paths := []string{
+		filepath.Join(RepoDir, ObjectsDir),
+		filepath.Join(RepoDir, "refs"),
+	}
+
+	for _, p := range paths {
+		if err := os.MkdirAll(p, 0o0755); err != nil {
+			return fmt.Errorf("failed to init repo at %s: %w", p, err)
+		}
+	}
+	return nil
 }

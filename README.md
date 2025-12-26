@@ -1,2 +1,2 @@
 ### The "git" of finance
-TBA
+WIP "git-like" tool for financial data (with compression)

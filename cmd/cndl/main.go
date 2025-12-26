@@ -1,19 +1,15 @@
 package main
 
 import (
-	"cndl/internal/store"
-	"cndl/internal/utils"
-	"encoding/binary"
-	"errors"
 	"fmt"
-	"github.com/prometheus/prometheus/tsdb/chunkenc"
+	"os"
 	"hash/crc32"
-	"log"
-)
+	"encoding/binary"
 
-var (
-	ErrInvalidChecksum = errors.New("checksum mismatch: data is corrupted")
-	ErrTooSmall        = errors.New("file too small to be a valid chunk")
+	"cndl/internal/utils"
+	"cndl/internal/store"
+	"github.com/spf13/cobra"
+	"github.com/prometheus/prometheus/tsdb/chunkenc"
 )
 
 func WrapChunk(c chunkenc.Chunk) []byte {
@@ -32,66 +28,54 @@ func WrapChunk(c chunkenc.Chunk) []byte {
 	return res
 }
 
-func ReadAndValidateChunk(data []byte) (chunkenc.Chunk, error) {
-	if len(data) < 5 {
-		return nil, ErrTooSmall
-	}
-
-	payload := data[:len(data)-4]
-	want := binary.BigEndian.Uint32(data[len(data)-4:])
-
-	table := crc32.MakeTable(crc32.Castagnoli)
-	got := crc32.Checksum(payload, table)
-
-	if got != want {
-		return nil, ErrInvalidChecksum
-	}
-
-	encByte := payload[0]
-	encoding := chunkenc.Encoding(encByte)
-
-	if chunkenc.Encoding(encByte) != chunkenc.EncXOR {
-		return nil, fmt.Errorf("unsupported encoding type: %d", encoding)
-	}
-
-	c := chunkenc.NewXORChunk()
-	c.Reset(payload[1:])
-
-	return c, nil
-}
-
 func main() {
-	c := chunkenc.NewXORChunk()
-	appender, _ := c.Appender()
-	for i, v := range utils.GenerateGBM(100, 7200, 0, 0.001) {
-		appender.Append(int64(i)+1, v)
+	var root = &cobra.Command{Use: "cndl"}
+
+	var initCmd = &cobra.Command{
+		Use:   "init",
+		Short: "Initialize the data store",
+		Run: func(cmd *cobra.Command, args []string) {
+			err := store.InitRepository()
+			if err != nil {
+				fmt.Printf("Failed to init: %v\n", err)
+				os.Exit(1)
+			}
+			path, _ := store.GetRepoPath()
+			fmt.Printf("Initialized Cndl repo at: %s\n", path)
+		},
 	}
 
-	data := WrapChunk(c)
-	hash, err := store.WriteObject(data)
-	if err != nil {
-		log.Fatalf("Error saving data: %v", err)
+	var addCmd = &cobra.Command{
+		Use:   "add [ticker]",
+		Short: "Generate and add a data chunk for a ticker",
+		Args:  cobra.ExactArgs(1), // Requires exactly 1 argument (the ticker)
+		Run: func(cmd *cobra.Command, args []string) {
+			ticker := args[0]
+
+			if !store.IsInitialized() {
+				fmt.Println("Error: Not a cndl repository. Run 'cndl init' first.")
+				os.Exit(1)
+			}
+
+			c := chunkenc.NewXORChunk()
+			appender, _ := c.Appender()
+			for i, v := range utils.GenerateGBM(100, 7200, 0, 0.001) {
+				appender.Append(int64(i), v)
+			}
+
+			data := WrapChunk(c)
+
+			hash, err := store.WriteObject(data)
+			if err != nil {
+				fmt.Printf("Failed to store: %v\n", err)
+				os.Exit(1)
+			}
+
+			fmt.Printf("Ticker: %s\n", ticker)
+			fmt.Printf("Stored as Object: %s\n", hash)
+		},
 	}
-	fmt.Printf("Successfully committed object: %s\n", hash)
 
-	newChunk, err := ReadAndValidateChunk(data)
-	if err != nil {
-		fmt.Printf("Failed to read object: %v\n", err)
-		return
-	}
-
-	it := newChunk.Iterator(nil)
-
-	for {
-		if it.Next() == chunkenc.ValNone {
-			break
-		}
-
-		t, v := it.At()
-		fmt.Printf("Timestamp: %d, Value: %f\n", t, v)
-	}
-
-	if err := it.Err(); err != nil {
-		fmt.Printf("Error during iteration: %v\n", err)
-	}
+	root.AddCommand(initCmd, addCmd)
+	root.Execute()
 }
