@@ -43,7 +43,7 @@ func WriteObject(data []byte) (string, error) {
     shardDir := filepath.Join(base, ObjectsDir, hash[:2])
     
     if err := os.MkdirAll(shardDir, 0o0755); err != nil {
-        return "", fmt.Errorf("failed to create shard dir: %w", err)
+        return "", fmt.Errorf("failed to create shard: %w", err)
     }
 
     path := filepath.Join(shardDir, hash[2:])
@@ -63,7 +63,7 @@ func WriteObject(data []byte) (string, error) {
     }
 
     if err := fp.Sync(); err != nil {
-        return "", err
+        return "", fmt.Errorf("failed to sync object: %w", err)
     }
 
     return hash, nil
