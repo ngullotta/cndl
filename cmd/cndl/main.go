@@ -75,6 +75,12 @@ func main() {
 				os.Exit(1)
 			}
 
+			symbol := args[0]
+			if err := s.UpdateSymbolHead(symbol, hash); err != nil {
+				fmt.Printf("failed to update HEAD %v\n", err)
+				os.Exit(1)
+			}
+
 			fmt.Printf("Object Hash: %s\n", hash)
 		},
 	}
