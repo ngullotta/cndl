@@ -11,6 +11,8 @@ import (
 const (
 	RepoDir    = ".cndl"
 	ObjectsDir = "objects"
+	RefsDir    = "refs"
+	LogDir     = "logs" // UNUSED
 )
 
 type Store struct {
@@ -26,8 +28,8 @@ func New(projectRoot string) *Store {
 func (s *Store) Init() error {
 	paths := []string{
 		filepath.Join(s.Root, ObjectsDir),
-		filepath.Join(s.Root, "refs"),
-		filepath.Join(s.Root, "index"),
+		filepath.Join(s.Root, RefsDir),
+		filepath.Join(s.Root, LogDir),
 	}
 
 	for _, p := range paths {
