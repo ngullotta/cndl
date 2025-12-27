@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const (
@@ -136,4 +137,25 @@ func (s *Store) ResolvePath(prefix string) (string, error) {
 	}
 
 	return "", fmt.Errorf("no object matching prefix %s", prefix)
+}
+
+func (s *Store) UpdateSymbolHead(symbol string, hash string) error {
+	refPath := filepath.Join(s.Root, RefsDir, "head", strings.ToLower(symbol))
+	if err := os.MkdirAll(filepath.Dir(refPath), 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(refPath, []byte(hash), 0644)
+}
+
+func (s *Store) GetSymbolHead(symbol string) (string, error) {
+	refPath := filepath.Join(s.Root, RefsDir, "head", symbol)
+
+	data, err := os.ReadFile(refPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("ticker %s not tracked", symbol)
+		}
+		return "", err
+	}
+	return string(data), nil
 }
