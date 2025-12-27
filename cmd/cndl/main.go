@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"hash/crc32"
 	"os"
+	"path/filepath"
+	"time"
 
 	"cndl/internal/store"
 	"cndl/internal/utils"
@@ -53,7 +55,6 @@ func main() {
 		Short: "Generate and add a data chunk for a ticker",
 		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
-			// 1. Check if store is initialized
 			if !s.Exists() {
 				fmt.Println("Error: Not a cndl repository. Run 'cndl init' first.")
 				os.Exit(1)
@@ -76,8 +77,8 @@ func main() {
 			}
 
 			symbol := args[0]
-			if err := s.UpdateSymbolHead(symbol, hash); err != nil {
-				fmt.Printf("failed to update HEAD %v\n", err)
+			if err := s.WriteRef("fetch/"+symbol, hash); err != nil {
+				fmt.Printf("failed to update ref: %v\n", err)
 				os.Exit(1)
 			}
 
@@ -141,7 +142,51 @@ func main() {
 		},
 	}
 
-	rootCmd.AddCommand(initCmd, addCmd, showCmd)
+	var commitCmd = &cobra.Command{
+		Use:   "commit -m [message]",
+		Short: "Record a snapshot of the staged data",
+		Run: func(cmd *cobra.Command, args []string) {
+			msg, _ := cmd.Flags().GetString("message")
+
+			parent, _ := s.ReadRef("heads/main")
+
+			newSnapshot := make(map[string]string)
+
+			if parent != "" {
+				oldCommit, _ := s.ReadCommit(parent)
+				for k, v := range oldCommit.Snapshot {
+					newSnapshot[k] = v
+				}
+			}
+
+			symbols, _ := filepath.Glob(filepath.Join(s.Root, "refs/fetch/*"))
+			for _, path := range symbols {
+				ticker := filepath.Base(path)
+				hash, _ := os.ReadFile(path)
+				newSnapshot[ticker] = string(hash)
+			}
+
+			c := store.Commit{
+				Parent:    parent,
+				Timestamp: time.Now().Unix(),
+				Message:   msg,
+				Snapshot:  newSnapshot,
+			}
+
+			commitHash, err := s.WriteCommit(c)
+			if err != nil {
+				fmt.Printf("Failed to commit: %v\n", err)
+				return
+			}
+
+			s.WriteRef("heads/main", commitHash)
+
+			fmt.Printf("Created commit: %s\n", commitHash[:8])
+			fmt.Printf("Message: %s\n", msg)
+		},
+	}
+
+	rootCmd.AddCommand(initCmd, addCmd, showCmd, commitCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Println(err)

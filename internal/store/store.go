@@ -3,6 +3,7 @@ package store
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,32 +14,49 @@ const (
 	RepoDir    = ".cndl"
 	ObjectsDir = "objects"
 	RefsDir    = "refs"
-	LogDir     = "logs" // UNUSED
 )
+
+type Commit struct {
+	Parent    string            `json:"parent"`
+	Timestamp int64             `json:"timestamp"`
+	Message   string            `json:"message"`
+	Snapshot  map[string]string `json:"snapshot"`
+}
 
 type Store struct {
 	Root string
 }
 
 func New(projectRoot string) *Store {
-	return &Store{
-		Root: filepath.Join(projectRoot, RepoDir),
-	}
+	return &Store{Root: filepath.Join(projectRoot, RepoDir)}
 }
 
 func (s *Store) Init() error {
-	paths := []string{
-		filepath.Join(s.Root, ObjectsDir),
-		filepath.Join(s.Root, RefsDir),
-		filepath.Join(s.Root, LogDir),
-	}
-
-	for _, p := range paths {
-		if err := os.MkdirAll(p, 0o0755); err != nil {
-			return fmt.Errorf("failed to init store at %s: %w", p, err)
+	for _, d := range []string{ObjectsDir, RefsDir} {
+		if err := os.MkdirAll(filepath.Join(s.Root, d), 0o0755); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func (s *Store) Put(data []byte) (string, error) {
+	hash := s.hash(data)
+	path := s.objectPath(hash)
+
+	if _, err := os.Stat(path); err == nil {
+		return hash, nil
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o0755); err != nil {
+		return "", err
+	}
+
+	return hash, os.WriteFile(path, data, 0o644)
+}
+
+func (s *Store) Get(hash string) ([]byte, error) {
+	return os.ReadFile(s.objectPath(hash))
 }
 
 func (s *Store) Exists() bool {
@@ -46,70 +64,35 @@ func (s *Store) Exists() bool {
 	return err == nil && info.IsDir()
 }
 
-func (s *Store) Put(data []byte) (string, error) {
-	hash := s.hash(data)
-	shard := hash[:2]
-	name := hash[2:]
-
-	shardDir := filepath.Join(s.Root, ObjectsDir, shard)
-	if err := os.MkdirAll(shardDir, 0o0755); err != nil {
-		return "", fmt.Errorf("shard creation failed: %w", err)
+func (s *Store) WriteRef(name string, hash string) error {
+	path := filepath.Join(s.Root, RefsDir, strings.ToLower(name))
+	if err := os.MkdirAll(filepath.Dir(path), 0o0755); err != nil {
+		return err
 	}
+	return os.WriteFile(path, []byte(hash), 0o0644)
+}
 
-	path := filepath.Join(shardDir, name)
+func (s *Store) ReadRef(name string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(s.Root, RefsDir, strings.ToLower(name)))
+	return string(data), err
+}
 
-	// Idempotency check
-	if _, err := os.Stat(path); err == nil {
-		return hash, nil
-	}
-
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+func (s *Store) WriteCommit(c Commit) (string, error) {
+	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
-
-	if _, err := f.Write(data); err != nil {
-		return "", err
-	}
-
-	if err := f.Sync(); err != nil {
-		return "", fmt.Errorf("fsync failed: %w", err)
-	}
-
-	return hash, nil
+	return s.Put(data)
 }
 
-func (s *Store) Get(hash string) ([]byte, error) {
-	path := filepath.Join(s.Root, ObjectsDir, hash[:2], hash[2:])
-	data, err := os.ReadFile(path)
+func (s *Store) ReadCommit(hash string) (Commit, error) {
+	var c Commit
+	data, err := s.Get(hash)
 	if err != nil {
-		return nil, fmt.Errorf("read object %s: %w", hash, err)
+		return c, err
 	}
-	return data, nil
-}
-
-func (s *Store) Delete(hash string) error {
-	path := filepath.Join(s.Root, ObjectsDir, hash[:2], hash[2:])
-	return os.Remove(path)
-}
-
-func (s *Store) List() ([]string, error) {
-	var hashes []string
-	objRoot := filepath.Join(s.Root, ObjectsDir)
-
-	err := filepath.Walk(objRoot, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if !info.IsDir() {
-			shard := filepath.Base(filepath.Dir(path))
-			hashes = append(hashes, shard+info.Name())
-		}
-		return nil
-	})
-
-	return hashes, err
+	err = json.Unmarshal(data, &c)
+	return c, err
 }
 
 func (s *Store) hash(data []byte) string {
@@ -117,45 +100,23 @@ func (s *Store) hash(data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
+func (s *Store) objectPath(hash string) string {
+	return filepath.Join(s.Root, ObjectsDir, hash[:2], hash[2:])
+}
+
 func (s *Store) ResolvePath(prefix string) (string, error) {
 	if len(prefix) < 3 {
-		return "", fmt.Errorf("hash prefix too short")
+		return "", fmt.Errorf("prefix too short")
 	}
-
-	shard := prefix[:2]
-	dir := filepath.Join(s.Root, ObjectsDir, shard)
-
+	dir := filepath.Join(s.Root, ObjectsDir, prefix[:2])
 	files, err := os.ReadDir(dir)
 	if err != nil {
-		return "", fmt.Errorf("object not found")
+		return "", err
 	}
-
 	for _, f := range files {
-		if len(f.Name()) >= len(prefix)-2 && f.Name()[:len(prefix)-2] == prefix[2:] {
+		if strings.HasPrefix(f.Name(), prefix[2:]) {
 			return filepath.Join(dir, f.Name()), nil
 		}
 	}
-
-	return "", fmt.Errorf("no object matching prefix %s", prefix)
-}
-
-func (s *Store) UpdateSymbolHead(symbol string, hash string) error {
-	refPath := filepath.Join(s.Root, RefsDir, "head", strings.ToLower(symbol))
-	if err := os.MkdirAll(filepath.Dir(refPath), 0755); err != nil {
-		return err
-	}
-	return os.WriteFile(refPath, []byte(hash), 0644)
-}
-
-func (s *Store) GetSymbolHead(symbol string) (string, error) {
-	refPath := filepath.Join(s.Root, RefsDir, "head", symbol)
-
-	data, err := os.ReadFile(refPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", fmt.Errorf("ticker %s not tracked", symbol)
-		}
-		return "", err
-	}
-	return string(data), nil
+	return "", fmt.Errorf("object not found")
 }
